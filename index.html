@@ -37,7 +37,7 @@ let bgLayer, scoreText;
 
 // モバイル判定関数
 function isMobile() {
-  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  return /Android|iPhone|iPad|iPod|Macintosh/i.test(navigator.userAgent) && 'ontouchend' in document;
 }
 
 // フィールドの描画位置やタイルサイズの動的再計算
