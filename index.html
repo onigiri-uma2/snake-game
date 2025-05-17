@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>スネークゲーム</title>
+  <link rel="icon" href="assets/favicon.png" type="image/png">
+  <!-- モバイル対応のviewport設定 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <style>
+    html, body { margin: 0; padding: 0; overflow: hidden; touch-action: none; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+  </style>
+</head>
+<body>
+<!-- Phaser本体と仮想ジョイスティックプラグインのCDN -->
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/phaser3-rex-plugins/dist/rexvirtualjoystickplugin.min.js"></script>
+<script>
+// ==========================
+// 定数・グローバル変数宣言
+// ==========================
+const gridSize = 20;         // フィールドの縦横グリッド数
+let tileSize = 16;           // タイル1マスの大きさ（動的に計算）
+let centerX = 400, centerY = 100; // フィールドの中心座標（描画位置計算用）
+
+// 移動方向ごとの情報まとめ
+const directions = {
+  right: { x: 1, y: 0, head: 'snake-head-right', tail: 'snake-tail-right' },
+  left:  { x: -1, y: 0, head: 'snake-head-left',  tail: 'snake-tail-left' },
+  up:    { x: 0, y: -1, head: 'snake-head-up',    tail: 'snake-tail-up' },
+  down:  { x: 0, y: 1,  head: 'snake-head-down',  tail: 'snake-tail-down' }
+};
+
+let direction, nextMoveTime = 0, moveInterval = 200, score = 0;
+let snake = [], snakeSprites = [], oneBody;
+let bgLayer, scoreText;
+
+// モバイル判定関数
+function isMobile() {
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+}
+
+// フィールドの描画位置やタイルサイズの動的再計算
+function calculateFieldLayout(scene) {
+  const margin = 9;
+  const maxTileWidth  = scene.scale.width  / (gridSize + margin * 2);
+  const maxTileHeight = (scene.scale.height - 200) / (gridSize + margin * 2);
+  tileSize = Math.floor(Math.min(maxTileWidth, maxTileHeight));
+  centerX = scene.scale.width / 2;
+  centerY = scene.scale.height/2 - ((gridSize * tileSize));
+}
+
+// ==========================
+// Phaser設定
+// ==========================
+const config = {
+  type: Phaser.AUTO,
+  scale: {
+    mode: Phaser.Scale.RESIZE,  // ウィンドウリサイズに合わせる
+    autoCenter: Phaser.Scale.CENTER_BOTH,
+    width: window.innerWidth,
+    height: window.innerHeight
+  },
+  backgroundColor: '#2d2d2d',
+  scene: { preload, create, update },
+  plugins: {
+    scene: [
+      {
+        key: 'rexvirtualjoystickplugin',
+        plugin: window.rexvirtualjoystickplugin,
+        mapping: 'rexVirtualJoystick'
+      }
+    ]
+  }
+};
+
+// ==========================
+// アセット読込
+// ==========================
+function preload() {
+  // ヘビの頭・しっぽ、各方向分を読み込み
+  const parts = ['head', 'tail'];
+  const dirs = ['right', 'left', 'up', 'down'];
+  for (const part of parts)
+    for (const dir of dirs)
+      this.load.image(`snake-${part}-${dir}`, `assets/snake-${part}-${dir}.png`);
+  // 体
+  this.load.image('snake-body', 'assets/snake-body.png');
+}
+
+// ==========================
+// ゲーム初期化
+// ==========================
+function create() {
+  // レイアウトサイズ計算
+  calculateFieldLayout(this);
+
+  // ヘビ初期状態
+  snake = [{ x: 10, y: 10 }, { x: 9, y: 10 }];
+  direction = directions.right;
+  snakeSprites = [];
+  moveInterval = 200;
+  score = 0;
+  nextMoveTime = 0;
+  this.pendingDirection = direction; // 次の進行方向
+  this.isGameOver = false;           // ゲームオーバー状態
+
+  // キーボード操作の方向転換
+  this.input.keyboard.on('keydown', e => {
+    if (this.isGameOver) return;
+    const map = {
+      ArrowUp: directions.up,
+      ArrowDown: directions.down,
+      ArrowLeft: directions.left,
+      ArrowRight: directions.right
+    };
+    const newDir = map[e.code];
+    // 逆方向には進めないように制御
+    if (newDir && (newDir.x !== -direction.x || newDir.y !== -direction.y))
+      this.pendingDirection = newDir;
+  });
+
+  // フィールド背景（壁や床）描画
+  bgLayer = this.add.layer();
+  for (let y = 0; y < gridSize; y++) {
+    for (let x = 0; x < gridSize; x++) {
+      const pos = toIso(x, y);
+      const isWall = (x === 0 || y === 0 || x === gridSize - 1 || y === gridSize - 1);
+      // 壁：暗色、床：市松模様風
+      const color = isWall ? 0x222222 : ((x + y) % 2 === 0 ? 0x444444 : 0x555555);
+      const tile = this.add.rectangle(pos.x, pos.y, tileSize, tileSize / 2, color).setOrigin(0.5);
+      bgLayer.add(tile);
+    }
+  }
+
+  // ヘビのスプライト配置
+  for (let i = 0; i < snake.length; i++) {
+    const pos = toIso(snake[i].x, snake[i].y);
+    const tex = i === 0 ? direction.head : direction.tail;
+    snakeSprites.push(this.add.image(pos.x, pos.y, tex).setDisplaySize(tileSize, tileSize).setOrigin(0.5));
+  }
+
+  // 体の（oneBody）配置
+  oneBody = spawnOneBody();
+  const oneBodyPos = toIso(oneBody.x, oneBody.y);
+  this.oneBodySprite = this.add.image(oneBodyPos.x, oneBodyPos.y, 'snake-body')
+    .setDisplaySize(tileSize, tileSize).setOrigin(0.5);
+
+  // スコア表示
+  scoreText = this.add.text(20, centerY - 20, 'SCORE: 0', { fontSize: Math.max(14, tileSize), fill: '#ffffff' }).setScrollFactor(0);
+
+  // モバイル時、画面タップでバーチャルジョイスティック表示
+  if (isMobile()) {
+    this.input.on('pointerdown', pointer => {
+      if (this.joyStick) this.joyStick.destroy();
+      this.joyStick = this.rexVirtualJoystick.add(this, {
+        x: pointer.x,
+        y: pointer.y,
+        radius: tileSize * 2,
+        base: this.add.circle(0, 0, tileSize * 2, 0x888888),
+        thumb: this.add.circle(0, 0, tileSize, 0xcccccc),
+        dir: '8dir',      // 8方向入力
+        forceMin: 5,
+        enable: true
+      });
+      this.joyKeys = this.joyStick.createCursorKeys();
+    });
+  }
+
+  // ウィンドウリサイズ時はシーン再起動（画面サイズに再フィット）
+  this.scale.on('resize', () => {
+    this.scene.restart();
+  });
+}
+
+// ==========================
+// 毎フレームの更新処理
+// ==========================
+function update(time) {
+  // ======================
+  // ジョイスティック入力処理
+  // ======================
+  if (this.joyKeys && !this.isGameOver) {
+    let dx = 0, dy = 0;
+    if (this.joyKeys.left.isDown) dx -= 1;
+    if (this.joyKeys.right.isDown) dx += 1;
+    if (this.joyKeys.up.isDown) dy -= 1;
+    if (this.joyKeys.down.isDown) dy += 1;
+
+    let newDir = null;
+    // クォータービュー風マッピング（例：右上入力→上、右下入力→右など）
+    if (dx === 1 && dy === -1) {         // 右上
+      newDir = directions.up;
+    } else if (dx === 1 && dy === 1) {   // 右下
+      newDir = directions.right;
+    } else if (dx === -1 && dy === 1) {  // 左下
+      newDir = directions.down;
+    } else if (dx === -1 && dy === -1) { // 左上
+      newDir = directions.left;
+    } else if (dx === 1) {
+      newDir = directions.right;
+    } else if (dx === -1) {
+      newDir = directions.left;
+    } else if (dy === -1) {
+      newDir = directions.up;
+    } else if (dy === 1) {
+      newDir = directions.down;
+    }
+
+    // 逆方向移動防止
+    if (newDir && (newDir.x !== -direction.x || newDir.y !== -direction.y)) {
+      this.pendingDirection = newDir;
+    }
+  }
+
+  // 移動間隔待ち（moveInterval）を制御
+  if (time < nextMoveTime) return;
+
+  // 実際の移動処理
+  direction = this.pendingDirection;
+  const head = snake[0];
+  const newHead = { x: head.x + direction.x, y: head.y + direction.y };
+
+  // 衝突判定（壁・自分自身）
+  if (
+    newHead.x <= 0 || newHead.y <= 0 ||
+    newHead.x >= gridSize - 1 || newHead.y >= gridSize - 1 ||
+    snake.some(seg => seg.x === newHead.x && seg.y === newHead.y)
+  ) {
+    this.isGameOver = true;
+    // ゲームオーバー表示
+    this.add.text(centerX - tileSize * 5, centerY + tileSize * 20, 'Game Over', { fontSize: tileSize * 2, fill: '#ff4444' });
+
+    // 再スタートUI
+    if (!isMobile()) {
+      this.add.text(centerX - tileSize * 8, centerY + tileSize * 22, 'Press SPACE to Restart', { fontSize: tileSize * 1.5, fill: '#ffffff' });
+      this.input.keyboard.once('keydown-SPACE', () => this.scene.restart());
+    } else {
+      const restartButton = this.add.text(centerX, centerY + tileSize * 25, 'RESTART', {
+        fontSize: tileSize * 1.8,
+        backgroundColor: '#ffffff',
+        color: '#000000',
+        padding: { x: tileSize, y: tileSize / 2 },
+        align: 'center'
+      }).setOrigin(0.5).setInteractive();
+      restartButton.once('pointerdown', () => this.scene.restart());
+    }
+    return;
+  }
+
+  // 新しい頭を追加
+  snake.unshift(newHead);
+
+  // 体の取得判定
+  if (newHead.x === oneBody.x && newHead.y === oneBody.y) {
+    // 新たなカラダを出現
+    oneBody = spawnOneBody();
+    const oneBodyPos = toIso(oneBody.x, oneBody.y);
+    this.oneBodySprite.setPosition(oneBodyPos.x, oneBodyPos.y);
+    score++;
+    // スコアが偶数ごとに速度アップ
+    if (score % 2 === 0) moveInterval = Math.max(50, moveInterval - 10);
+    scoreText.setText('SCORE: ' + score);
+  } else {
+    // 体非取得時は最後尾を削除（長さ維持）
+    snake.pop();
+  }
+
+  // スプライトの数が足りなければ追加
+  while (snakeSprites.length < snake.length) {
+    const pos = toIso(snake[0].x, snake[0].y);
+    const dummy = this.add.image(pos.x, pos.y, 'snake-body').setDisplaySize(tileSize, tileSize).setOrigin(0.5);
+    snakeSprites.splice(snakeSprites.length - 1, 0, dummy);
+  }
+
+  // スプライト位置＆見た目更新
+  snake.forEach((seg, i) => {
+    const pos = toIso(seg.x, seg.y);
+    const sprite = snakeSprites[i];
+    if (i === 0) {
+      // 頭
+      sprite.setTexture(direction.head);
+    } else if (i === snake.length - 1) {
+      // しっぽ（1つ前との相対方向で判定）
+      const prev = snake[i - 1];
+      const dx = prev.x - seg.x;
+      const dy = prev.y - seg.y;
+      for (const dir of Object.values(directions)) {
+        if (dir.x === dx && dir.y === dy) sprite.setTexture(dir.tail);
+      }
+    } else {
+      // 体
+      sprite.setTexture('snake-body');
+    }
+    // Tweenで移動をなめらかに
+    this.tweens.add({ targets: sprite, x: pos.x, y: pos.y, duration: moveInterval, ease: 'Linear' });
+  });
+
+  // 次回移動時刻を更新
+  nextMoveTime = time + moveInterval;
+}
+
+// ==========================
+// 座標→アイソメトリック変換
+// ==========================
+function toIso(x, y) {
+  // クォータービュー風の変換式
+  return {
+    x: centerX + (x - y) * tileSize,
+    y: centerY + (x + y) * tileSize / 2
+  };
+}
+
+// ==========================
+// 体出現位置を決定
+// ==========================
+function spawnOneBody() {
+  let x, y;
+  do {
+    x = Phaser.Math.Between(1, gridSize - 2);
+    y = Phaser.Math.Between(1, gridSize - 2);
+  } while (snake.some(seg => seg.x === x && seg.y === y));
+  return { x, y };
+}
+
+// ==========================
+// ゲーム開始
+// ==========================
+new Phaser.Game(config);
+</script>
+</body>
+</html>
